@@ -5,8 +5,14 @@ standard library (`net/http`, `json`) and is thread-safe: each call opens its
 own connection.
 
 ```ruby
-# Gemfile
-gem 'stockfish_pool_client', path: 'stockfish-pool/client'
+# Gemfile — pin a release tag (keep equal to the app's POOL_REF)
+gem 'stockfish_pool_client',
+    git: 'https://github.com/cpmurphy/stockfish-pool.git',
+    glob: 'client/*.gemspec',
+    tag: 'v0.1.0'
+
+# Local development against a checkout:
+#   bundle config local.stockfish_pool_client /path/to/stockfish-pool/client
 ```
 
 ```ruby
