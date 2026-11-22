@@ -1,0 +1,64 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Writes this repo's StockfishPool::Rules into an app's ChessRules tree.
+#
+#   bin/export-chess-rules /path/to/app/lib/chess_rules
+#   bin/export-chess-rules /path/to/app/lib/chess_rules --check
+#
+# Only the shared files are exported (position.rb, moves.rb, position_check.rb).
+# Each app keeps its own entry file and san.rb.
+
+require 'fileutils'
+
+ROOT = File.expand_path('..', __dir__)
+POOL_DIR = File.join(ROOT, 'lib/stockfish_pool/rules')
+SHARED_FILES = %w[position.rb moves.rb position_check.rb].freeze
+
+# Comments that name each copy's own input validator.
+WORDING = {
+  'position.rb' => [['whose shape InputValidator has already',
+                     'whose shape UciInputValidator has already']],
+  'position_check.rb' => [['already guaranteed by InputValidator.',
+                           'already guaranteed by the FEN shape check (UciInputValidator).']]
+}.freeze
+
+def app_source(pool_source, name)
+  text = WORDING.fetch(name, []).reduce(pool_source) { |acc, (pool, app)| acc.gsub(pool, app) }
+  match = text.match(
+    /\A(?<head>.*?)module StockfishPool\n(?<comment>(?:  #.*\n)*)  module Rules\n(?<body>.*)end\n\z/m
+  )
+  raise "#{name}: unexpected StockfishPool::Rules layout" unless match
+
+  comment = match[:comment].gsub(/^  /, '')
+  body = match[:body].lines.map do |line|
+    next line if line.strip.empty?
+    raise "#{name}: line not indented under Rules: #{line.inspect}" unless line.start_with?('  ')
+
+    line[2..]
+  end.join.gsub(/\bRules\./, 'ChessRules.')
+  # body still ends with the Rules `end`, which becomes ChessRules' `end`.
+  "#{match[:head]}#{comment}module ChessRules\n#{body}"
+end
+
+abort "usage: #{$PROGRAM_NAME} APP_CHESS_RULES_DIR [--check]" if ARGV.empty? || ARGV[0].start_with?('-')
+
+app_dir = File.expand_path(ARGV[0])
+check = ARGV.include?('--check')
+FileUtils.mkdir_p(app_dir) unless check
+
+changed = SHARED_FILES.select do |name|
+  expected = app_source(File.read(File.join(POOL_DIR, name)), name)
+  app_path = File.join(app_dir, name)
+  next false if File.exist?(app_path) && File.read(app_path) == expected
+
+  File.write(app_path, expected) unless check
+  true
+end
+
+if check && changed.any?
+  warn "ChessRules out of date vs stockfish-pool: #{changed.join(', ')}. " \
+       "Run: stockfish-pool/bin/export-chess-rules #{app_dir}"
+  exit 1
+end
+puts(changed.empty? ? 'Already in sync.' : "Updated #{changed.join(', ')}.") unless check
