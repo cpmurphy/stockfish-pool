@@ -1,17 +1,72 @@
-# Inherits the repository style. Paths in an inherited config are relative to
-# the file that defines them, so the test exclusions are restated here for
-# this directory's own test/ folder.
-inherit_from: ../.rubocop.yml
+plugins: rubocop-minitest
+
+AllCops:
+  NewCops: enable
+  TargetRubyVersion: 3.0
+  Exclude:
+    - 'bin/**/*'
+    - 'vendor/**/*'
+    - 'Stockfish/**/*'
+
+Style/Documentation:
+  Enabled: false
+
+Style/StringLiterals:
+  EnforcedStyle: single_quotes
+
+Style/FrozenStringLiteralComment:
+  Enabled: true
 
 Metrics/ClassLength:
-  Exclude: ['test/**/*']
+  Max: 150
+  Exclude:
+    - 'test/**/*'
+    - 'client/test/**/*'
+
 Metrics/ModuleLength:
-  Exclude: ['test/**/*']
+  Max: 120
+  Exclude:
+    - 'test/**/*'
+    - 'client/test/**/*'
+
 Metrics/MethodLength:
-  Exclude: ['test/**/*']
+  Max: 26
+  Exclude:
+    - 'test/**/*'
+    - 'client/test/**/*'
+
 Metrics/AbcSize:
-  Exclude: ['test/**/*']
+  Max: 25
+  Exclude:
+    - 'test/**/*'
+    - 'client/test/**/*'
+
 Metrics/BlockLength:
-  Exclude: ['test/**/*']
+  Max: 30
+  Exclude:
+    - 'test/**/*'
+    - 'client/test/**/*'
+
 Layout/LineLength:
-  Exclude: ['test/**/*']
+  Max: 120
+  Exclude:
+    - 'test/**/*'
+    - 'client/test/**/*'
+
+Naming/VariableNumber:
+  EnforcedStyle: snake_case
+
+Style/NumericLiterals:
+  Enabled: false
+
+Style/ClassAndModuleChildren:
+  Enabled: false
+
+Naming/MethodParameterName:
+  AllowedNames: ['id', 'ip', 'to', 'x', 'y', 'pv']
+
+# Pool tests assert several facts per example.
+Minitest/MultipleAssertions:
+  Exclude:
+    - 'test/**/*'
+    - 'client/test/**/*'
