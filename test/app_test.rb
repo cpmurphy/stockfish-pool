@@ -71,6 +71,51 @@ class AppTest < Minitest::Test
     assert_equal(searches_before, FakeWorker.registry.sum { |worker| worker.searches.size })
   end
 
+  # Malformed requests are refused with a 422 naming the problem, before any
+  # search reaches a worker. Bodies given as strings are sent as they are.
+  def test_rejects_malformed_requests_with_422
+    searches_before = FakeWorker.registry.sum { |worker| worker.searches.size }
+    [
+      ['[]', 'Request body must be a JSON object'],
+      ['"e2e4"', 'Request body must be a JSON object'],
+      ['42', 'Request body must be a JSON object'],
+      ['null', 'Request body must be a JSON object'],
+      [{ fen: START_FEN, moves: 'e2e4' }, 'moves must be an array'],
+      [{ fen: START_FEN, moves: { 'e2e4' => true } }, 'moves must be an array'],
+      [{ fen: START_FEN, moves: (%w[e2e4 e7e5] * 300) + ['g1f3'] }, 'At most 600 moves are allowed'],
+      [{ fen: START_FEN, moves: ['Nf3'] }, 'Invalid UCI move'],
+      [{ fen: START_FEN, depth: 0 }, 'depth must be a positive integer'],
+      [{ fen: START_FEN, depth: -1 }, 'depth must be a positive integer'],
+      [{ fen: START_FEN, depth: '16' }, 'depth must be a positive integer'],
+      [{ fen: START_FEN, depth: true }, 'depth must be a positive integer'],
+      [{ fen: START_FEN, multipv: 1.5 }, 'multipv must be a positive integer'],
+      [{ fen: START_FEN, nodes: '1000' }, 'nodes must be a positive integer'],
+      [{ fen: START_FEN, movetime_ms: 0 }, 'movetime_ms must be a positive integer'],
+      [{ fen: START_FEN, subject: "abc\ndef" }, 'Invalid subject'],
+      [{ fen: START_FEN, subject: 'a' * 65 }, 'Invalid subject'],
+      [{ fen: START_FEN, subject: '' }, 'Invalid subject'],
+      [{ fen: START_FEN, subject: 42 }, 'Invalid subject'],
+      [{ fen: START_FEN, lane: 'urgent' }, 'lane must be "interactive" or "batch"'],
+      [{}, 'Invalid FEN'],
+      [{ fen: 42 }, 'Invalid FEN'],
+      [{ fen: "#{START_FEN}#{' ' * 60}" }, 'Invalid FEN'], # over 100 characters
+      [{ fen: 'rnbqkbnr/pppppppp/9/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1' }, 'Invalid FEN'], # a rank of 9 squares
+      [{ fen: 'rnbqkbnr/pppppppp/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1' }, 'Invalid FEN'], # 7 ranks
+      [{ fen: 'rnbqkbnr/pppppppp/8/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1' }, 'Invalid FEN'], # 9 ranks
+      [{ fen: '4k3/8/8/8/8/P7/PPPPPPPP/4K3 w - - 0 1' }, # nine white pawns
+       'Illegal position: White has more pieces than a game can produce'],
+      [{ fen: 'qqq1k3/pppppppp/8/8/8/8/8/4K3 w - - 0 1' }, # two promoted queens, no pawn missing
+       'Illegal position: Black has more pieces than a game can produce']
+    ].each do |body, message|
+      response = analyze(body)
+
+      assert_equal 422, last_response.status, body.to_s
+      assert_equal 'invalid_request', response['error'], body.to_s
+      assert_equal message, response['message'], body.to_s
+    end
+    assert_equal(searches_before, FakeWorker.registry.sum { |worker| worker.searches.size })
+  end
+
   def test_rejects_bad_json_and_large_bodies
     analyze('{not json')
 
