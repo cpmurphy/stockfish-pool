@@ -1,22 +1,26 @@
 # frozen_string_literal: true
 
 require_relative 'test_helper'
-require_relative 'support/edge_case_generators'
+require_relative 'support/castling_generators'
 require_relative 'support/engine_server'
 
 # Property tests of POST /v1/analyze against real Stockfish, over HTTP, using
 # generated positions around promotions (every file, every piece), en passant
-# captures (every file, plus captures a pin makes illegal), checkmates and
-# stalemates. Each scenario covers the move before the edge case, the move
+# captures (every file, plus captures a pin makes illegal), castling (legal,
+# blocked, through or out of check, and after the right is lost), checkmates
+# and stalemates. Each scenario covers the move before the edge case, the move
 # itself and, where the game goes on, one move after.
 #
 # The properties:
 # - A position gives the same analysis however it is sent: as a FEN, or as an
 #   earlier FEN plus the moves that lead to it. This catches moves the engine
 #   silently ignores, and FEN fields (en passant, clocks) it reads differently.
-# - Every answer is sound by ChessModel: the best move and each PV are legal,
+# - Every answer is sound by ChessModel (by Stockfish's own perft, for
+#   castling, which ChessModel does not model): the best move and each PV are legal,
 #   MultiPV lines are distinct, mates in one are found, and a position with no
 #   legal moves is reported as checkmate or stalemate.
+# - A castling move is accepted exactly when perft lists it, whether the
+#   right comes from the FEN or survives the moves played before it.
 # - Concurrent requests get the same answers as the same requests sent one at
 #   a time, so workers do not leak state or answers to each other.
 #
@@ -31,6 +35,7 @@ class StockfishPropertyTest < Minitest::Test
   def setup
     skip 'Stockfish not installed' unless EngineServer::ENGINE
     @server = EngineServer.shared
+    @oracle = PerftOracle.shared
   end
 
   def test_promotions
@@ -49,19 +54,40 @@ class StockfishPropertyTest < Minitest::Test
     check_scenarios(EdgeCases.stalemate_case)
   end
 
-  # Random sampling may miss a file or a piece, so this goes through every
-  # promotion and en passant combination once, each on a fresh random board.
-  def test_every_promotion_and_en_passant_combination
+  def test_castling
+    check_scenarios(CastlingCases.castling_case(@oracle))
+  end
+
+  # Every castling-shaped move (both castles, and the king taking its own rook
+  # as Chess960 would write it) in every position of a castling line, sent
+  # after the moves that led there and from that position's own FEN, is
+  # accepted exactly when perft lists it. The pool's rules must also list the
+  # same legal moves as perft, after playing the same moves. Each combination
+  # catches its own kind of mistake, so every one is checked once before the
+  # random runs.
+  def test_castling_moves_are_accepted_exactly_when_legal
+    rng = Random.new
+
+    CastlingCases::COMBINATIONS.each do |combination|
+      assert_castling_acceptance(CastlingCases.castling(@oracle, **combination, seed: rng.rand(2**31)))
+    end
+    forall(CastlingCases.castling_case(@oracle)) { |scenario| assert_castling_acceptance(scenario) }
+  end
+
+  # Random sampling may miss a file, a piece or a way castling can go, so this
+  # goes through every promotion, en passant and castling combination once, each on a fresh random board.
+  def test_every_promotion_en_passant_and_castling_combination
     rng = Random.new
     scenarios = EdgeCases::PROMOTION_COMBINATIONS.map { |c| EdgeCases.promotion(**c, seed: rng.rand(2**31)) } +
-                EdgeCases::EN_PASSANT_COMBINATIONS.map { |c| EdgeCases.en_passant(**c, seed: rng.rand(2**31)) }
+                EdgeCases::EN_PASSANT_COMBINATIONS.map { |c| EdgeCases.en_passant(**c, seed: rng.rand(2**31)) } +
+                CastlingCases::COMBINATIONS.map { |c| CastlingCases.castling(@oracle, **c, seed: rng.rand(2**31)) }
 
     scenarios.each { |scenario| assert_scenario(scenario, multipv: rng.rand(1..3), lane: LANES.sample(random: rng)) }
     assert_engines_healthy
   end
 
   def test_concurrent_requests_match_sequential_results
-    batch = G.array(G.tuple(EdgeCases.edge_case, G.choose(1..3), EdgeCases.element(LANES)), min: 3, max: 8)
+    batch = G.array(G.tuple(any_case, G.choose(1..3), EdgeCases.element(LANES)), min: 3, max: 8)
     forall(batch, runs: [RUNS / 5, 2].max) do |cases|
       requests = cases.flat_map { |scenario, multipv, lane| requests_for(scenario, multipv, lane).map(&:last) }
       requests += [{ fen: 'not a fen' }, { fen: TestSupport::START_FEN, moves: ['e2e9'] }]
@@ -95,7 +121,7 @@ class StockfishPropertyTest < Minitest::Test
 
   # A move is accepted exactly when it is legal, so Stockfish never skips one.
   def test_moves_are_accepted_only_when_legal
-    cases = G.tuple(EdgeCases.edge_case, G.choose(0..3), G.boolean, EdgeCases.uci_shaped_move)
+    cases = G.tuple(any_case, G.choose(0..3), G.boolean, EdgeCases.uci_shaped_move)
     forall(cases) do |scenario, index, pick_legal, random_move|
       position = scenario.positions[index % scenario.positions.size]
       move = pick_legal && position.legal_moves.any? ? position.legal_moves.min : random_move
@@ -107,6 +133,41 @@ class StockfishPropertyTest < Minitest::Test
   end
 
   private
+
+  def any_case
+    G.one_of(EdgeCases.edge_case, CastlingCases.castling_case(@oracle))
+  end
+
+  def assert_castling_acceptance(scenario)
+    checks = castling_checks(scenario)
+    responses = @server.analyze_concurrently(checks.map(&:first))
+
+    checks.zip(responses).each do |(params, status), response|
+      assert_equal status, response.status, "#{params} -> #{response.body}\nin #{scenario.inspect}"
+    end
+  end
+
+  # [request params, expected status] for every castling-shaped move in every
+  # position of +scenario+, checking the pool's legal moves against perft on the way.
+  def castling_checks(scenario)
+    start = scenario.positions.first.to_fen
+    rules = StockfishPool::Rules::Position.from_fen(start)
+    scenario.positions.each_with_index.flat_map do |position, index|
+      rules = rules_after(rules, scenario.moves[index - 1]) if index.positive?
+
+      assert_equal position.legal_moves, StockfishPool::Rules::Moves.legal_moves(rules).sort,
+                   "Pool rules and perft disagree on #{position} (#{rules.to_fen}) in #{scenario.inspect}"
+      CastlingCases.candidates(position).flat_map do |move|
+        status = position.legal_moves.include?(move) ? 200 : 422
+        [{ fen: start, moves: scenario.moves[0...index] + [move] }, { fen: position.to_fen, moves: [move] }]
+          .map { |params| [params.merge(depth: 1), status] }
+      end
+    end
+  end
+
+  def rules_after(position, move)
+    position.after(StockfishPool::Rules.square(move[0, 2]), StockfishPool::Rules.square(move[2, 2]), move[4])
+  end
 
   def check_scenarios(scenario_generator)
     forall(scenario_generator, G.choose(1..3), EdgeCases.element(LANES)) do |scenario, multipv, lane|
